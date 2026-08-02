@@ -1,0 +1,85 @@
+# tapswarm ローカル開発環境
+#
+#   全部まとめて起動:      docker compose up --build
+#   データストアだけ起動:  docker compose up -d redis postgres
+#     （↑ APIは手元で cargo run。ビルドが速く、エラーも読みやすい）
+
+services:
+  # --------------------------------------------------------------------------
+  # APIサーバー
+  # --------------------------------------------------------------------------
+  api:
+    build: .
+    ports:
+      - "8080:8080"
+    environment:
+      BIND_ADDR: "0.0.0.0:8080"
+      REDIS_URL: "redis://redis:6379"
+      DATABASE_URL: "postgres://tapswarm:tapswarm@postgres:5432/tapswarm"
+
+      # PoC 用の固定値。どちらも 32 バイト以上が必須（§11）。
+      # 本番では必ず別のランダム値に差し替えること。
+      SIGNING_KEY: "dev-signing-key-do-not-use-in-production-0000000"
+      HASH_KEY: "dev-hash-key-do-not-use-in-production-0000000000"
+
+      # compose ではプロキシを挟まないので 0（TCPソースアドレスを使う）。
+      # Railway / Render 等に載せる際は 1 を設定しないと、X-Forwarded-For の
+      # 詐称でレート制限が無力化する（§5.4.3）。
+      TRUSTED_PROXY_HOPS: "0"
+
+      RUST_LOG: "tapswarm=debug,info"
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:8080/healthz"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    # ローカルでは再起動させない。設定ミスで起動に失敗したとき、
+    # 無限ループでログが埋まって原因が読めなくなるため。
+    restart: "no"
+
+  # --------------------------------------------------------------------------
+  # Hot層 — リアルタイム集計（§4.2）
+  # --------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    # AOF を有効化（§4.5）。Redis が飛んでも失われるのは直近ウィンドウの
+    # 滞在状態だけで、時間経過とともに自然に回復する。
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  # --------------------------------------------------------------------------
+  # Cold層 — 統計分析用ログ（§4.3）
+  # --------------------------------------------------------------------------
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: tapswarm
+      POSTGRES_PASSWORD: tapswarm
+      POSTGRES_DB: tapswarm
+    ports:
+      - "5432:5432"
+    volumes:
+      - pg-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tapswarm -d tapswarm"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  redis-data:
+  pg-data:
